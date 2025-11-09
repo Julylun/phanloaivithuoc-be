@@ -1,3 +1,4 @@
+from enum import Enum
 import cv2
 import os
 import threading
@@ -7,8 +8,25 @@ from queue import Queue
 import time
 import ffmpeg
 import io
-from typing import Iterator
+from typing import Counter, Iterator
+from queue import Queue
 
+CLASS_MAP = {
+    0: "Normal",
+    1: "Broken",
+    2: "Missing_bill",
+    3: "Missing_corner"
+}
+
+
+def show_yolo_image(img_array, title="YOLO Output"):
+    if img_array is None:
+        print("Ảnh không hợp lệ.")
+        return
+    # YOLO / OpenCV dùng định dạng BGR → hiển thị bằng cv2 trực tiếp
+    cv2.imshow(title, img_array)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 #Thu muc goc -> app
 # BASE_DIR = os.path(os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +36,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, '..', 'models', 'ai', 'best.pt')
 
 
+class Pill_Class(Enum):
+    NORMAL = 0
+    BROKEN = 1
+    MISSING_PILL = 2
+    MISSING_CORNER = 3
+    BROKEN_AND_MISSING_CORNER = 4
+    MISSING_PILL_AND_BROKEN = 5
+    
 class YoloService:
     def __init__(self):
         _max_queue = 10
@@ -30,14 +56,18 @@ class YoloService:
         self.model = YOLO(MODEL_PATH)
         self.cap = cv2.VideoCapture(0)
         self.frame_queue = Queue(maxsize=_max_queue)
+        self.retry_times = 5
 
         self.running = False
+
+        self.last_result = {"class_numer": -1, "detected_image": None}
         pass 
 
     def start_detection(self):
         """Bắt đầu nhận điện."""
         if not self.running:
             self.running = True
+            self.cap = cv2.VideoCapture(0)
             self.detection_thread = threading.Thread(target=self._detection_loop)
             self.detection_thread.start()
     
@@ -48,8 +78,34 @@ class YoloService:
             self.cap.release()
         pass
 
+    @staticmethod
+    def _detect_class(class_list) -> Pill_Class:
+        """
+        Missing Pill & Broken > Missing Pill > Broken & Missing Corner > Boken || Missing corner > Normal
+        """
+        if Pill_Class.MISSING_PILL.value in class_list and Pill_Class.BROKEN.value in class_list:
+            return Pill_Class.MISSING_PILL_AND_BROKEN
+        if Pill_Class.MISSING_PILL.value in class_list:
+            return Pill_Class.MISSING_PILL
+        if Pill_Class.BROKEN.value in class_list and Pill_Class.MISSING_CORNER.value in class_list:
+            return Pill_Class.BROKEN_AND_MISSING_CORNER
+        if Pill_Class.BROKEN.value in class_list:
+            return Pill_Class.BROKEN
+        if Pill_Class.MISSING_CORNER.value in class_list:
+            return Pill_Class.MISSING_CORNER
+        return Pill_Class.NORMAL
+    
+
+    def tinhTong(a, b):
+        return a + b
+    
+
+
     def _detection_loop(self):
         """Hàm xử lý quá trình nhận diện"""
+        collecting = False
+        temp_result_queue = Queue()
+        stop_counting_value = self.retry_times
         while(self.running):
             try:
                 ret, frame = self.cap.read()
@@ -58,9 +114,72 @@ class YoloService:
 
                 #Đưa ảnh vào Model và lấy kết quả nhận diện
                 results = self.model(frame, verbose=False)
-                annotated_frame = results[0].plot() #Vẽ box lên
+                annotated_frame = results[0].plot() #Vẽ box lê
+                result = results[0]
 
-                # time.sleep(3)
+                #Nếu đang thu thập + số lượng thuộc được nhận diện = 5 thì bắt đầu quá trình thu thập
+                if collecting is not True and hasattr(result, 'boxes') and len(result.boxes) == 5:
+                    collecting = True
+
+                #Nếu đang thu thập + số lượng thuốc = 0 thì kết thúc thu thập và đưa ra kết quả
+                if collecting and hasattr(result, 'boxes') and len(result.boxes) == 0:
+                    if stop_counting_value > 0:
+                        stop_counting_value-=1
+                    else:
+                        collecting = False 
+                        result_classes = []
+                        result_list = []
+
+                        while not temp_result_queue.empty():
+                            result = temp_result_queue.get()
+                            result_list.append(result)
+
+                            class_lists = []
+                            for box in result.boxes: #Lấy class trong vỉ thuốc
+                                cls = int(box.cls.cpu().numpy()) if hasattr(box.cls, "cpu") else int(box.cls)
+                                class_lists.append(cls)
+
+                            #Đưa loại vỉ thuốc vào mảng result_classes
+                            result_classes.append(YoloService._detect_class(class_lists))
+                    
+                        #Đếm số class có số lượng cao nhất để làm kết quả cuối cùng
+                        counted_result = Counter(result_classes)
+                        highest_class, highest_count = counted_result.most_common(1)[0]
+
+                        #Lấy ảnh kết quả ở giữa
+                        image_index = int(len(result_list) / 2)
+                        while True:
+                            _result = result_list[image_index]
+                            class_lists = []
+                            for box in result.boxes: #Lấy class trong vỉ thuốc
+                                cls = int(box.cls.cpu().numpy()) if hasattr(box.cls, "cpu") else int(box.cls)
+                                class_lists.append(cls)
+
+                            if YoloService._detect_class(class_lists) == highest_class:
+                                break
+
+                            if image_index >= len(result_list) - 1:
+                                image_index = 0
+
+                            image_index+=1
+
+                        last_result = {
+                            "class_number": highest_class.value,
+                            "detected_image": YoloService.draw_boxes(result_list[image_index])
+                        }
+                        image_text = str(image_index) + '/' + str(len(result_list)) 
+                        print(image_index)
+                        print(last_result)
+                        show_yolo_image(YoloService.draw_boxes(result_list[image_index]))
+                        #TODO: send last result to front end
+                    
+
+
+                #Đang thu thập + số thuốc = 5 thì vào Queue tạm thời
+                if collecting and hasattr(result, 'boxes') and len(result.boxes) == 5:
+                    stop_counting_value = self.retry_times
+                    temp_result_queue.put(result)
+
 
                 detection_data = {
                     'frame': annotated_frame,
@@ -74,6 +193,7 @@ class YoloService:
                 #Giới hạn tốc độ xử lý 33 ~ 30fps
                 cv2.waitKey(33)
             except Exception as e:
+                print(e)
                 print('Try to detect after 3s...')
                 time.sleep(3)
 

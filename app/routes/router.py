@@ -22,6 +22,21 @@ print('included')
 async def home():
     return {"message": "Welcome to Phanloaivithuoc"}
 
+@router.post("/detection/start")
+async def start_detection():
+    yolo_service.start_detection()
+
+@router.post("/detection/stop")
+async def stop_detection():
+    yolo_service.stop_detection()
+
+@router.post("/detection/export")
+async def export_detection():
+    print('exported!!!')
+
+
+
+
 @router.websocket("/ws/video-stream")
 async def video_stream(websocket: WebSocket):
     await websocket.accept()
