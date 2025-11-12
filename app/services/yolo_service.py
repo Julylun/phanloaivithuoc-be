@@ -1,7 +1,9 @@
+import base64
 from enum import Enum
 import cv2
 import os
 import threading
+from cv2_enumerate_cameras import enumerate_cameras
 from ultralytics import YOLO
 from snap7.util import *
 from queue import Queue
@@ -54,20 +56,24 @@ class YoloService:
         print('- Hàng chờ tối đa, max queue: ', _max_queue)
         print('---')
         self.model = YOLO(MODEL_PATH)
-        self.cap = cv2.VideoCapture(0)
+        self.camera_number = 0
+        self.cap = cv2.VideoCapture(self.camera_number)
         self.frame_queue = Queue(maxsize=_max_queue)
+        self.reatime_queue = Queue(maxsize=_max_queue)
         self.retry_times = 5
 
         self.running = False
 
-        self.last_result = {"class_numer": -1, "detected_image": None}
+        self.last_result = {"class_numer": None, "detected_image": None}
         pass 
 
     def start_detection(self):
         """Bắt đầu nhận điện."""
         if not self.running:
+            
             self.running = True
-            self.cap = cv2.VideoCapture(0)
+            YoloService.list_cameras()
+            self.cap = cv2.VideoCapture(self.camera_number)
             self.detection_thread = threading.Thread(target=self._detection_loop)
             self.detection_thread.start()
     
@@ -95,10 +101,25 @@ class YoloService:
             return Pill_Class.MISSING_CORNER
         return Pill_Class.NORMAL
     
+    @staticmethod
+    def list_cameras():
+        """Lists available cameras and their details."""
+        camera_list = enumerate_cameras(cv2.CAP_ANY) # CAP_ANY attempts to use the best backend
 
-    def tinhTong(a, b):
-        return a + b
-    
+        if not camera_list:
+            print("No cameras found.")
+            return
+
+        print("Available Cameras:")
+        for i, cam_info in enumerate(camera_list):
+            print(f"--- Camera {i} ---")
+            print(f"  Index: {cam_info.index}")
+            print(f"  Name: {cam_info.name}")
+            print(f"  Path: {cam_info.path}")
+            print(f"  Vendor ID (VID): {cam_info.vid}")
+            print(f"  Product ID (PID): {cam_info.pid}")
+            print(f"  Backend: {cam_info.backend}")
+
 
 
     def _detection_loop(self):
@@ -112,6 +133,7 @@ class YoloService:
                 if not ret:
                     raise Exception('Can not grab frame from camera')
 
+                original_frame = frame.copy()
                 #Đưa ảnh vào Model và lấy kết quả nhận diện
                 results = self.model(frame, verbose=False)
                 annotated_frame = results[0].plot() #Vẽ box lê
@@ -165,14 +187,11 @@ class YoloService:
 
                         last_result = {
                             "class_number": highest_class.value,
-                            "detected_image": YoloService.draw_boxes(result_list[image_index])
+                            "detected_image": YoloService._cv2_to_jpg(YoloService.draw_boxes(result_list[image_index]), 'base64')
                         }
-                        image_text = str(image_index) + '/' + str(len(result_list)) 
-                        print(image_index)
-                        print(last_result)
-                        show_yolo_image(YoloService.draw_boxes(result_list[image_index]))
-                        #TODO: send last result to front end
-                    
+
+                        self.last_result = last_result
+                        print('')
 
 
                 #Đang thu thập + số thuốc = 5 thì vào Queue tạm thời
@@ -182,6 +201,7 @@ class YoloService:
 
 
                 detection_data = {
+                    'original_frame': original_frame,
                     'frame': annotated_frame,
                     'detection': results[0].boxes.data.tolist() if results[0].boxes else []
                 }
@@ -229,10 +249,22 @@ class YoloService:
 
         return img
     
+    @staticmethod
+    def _cv2_to_jpg(cv2_image, return_format='bytes'):
+        """Chuyển ảnh cv2 sang dạng ảnh jpg bytes hoặc base64"""
+        _, buffer = cv2.imencode('.jpg', cv2_image, [cv2.IMWRITE_JPEG_QUALITY, 70])  # Tùy chỉnh chất lượng (0-100)
+        img_bytes = buffer.tobytes()
+
+        # Trả về theo format yêu cầu
+        if return_format == 'base64':
+            return base64.b64encode(img_bytes).decode('utf-8')
+        return img_bytes  # Mặc định bytes
+    
     def get_latest_frame(self):
         """Lấy frame mới nhất từ queue để gửi sang FE."""
         if not self.frame_queue.empty():
             return self.frame_queue.get()
         return None
+    
     
 yolo_service = YoloService()
